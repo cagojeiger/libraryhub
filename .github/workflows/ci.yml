@@ -1,5 +1,5 @@
-name: CI
-run-name: ${{ format('bridge:{0}:{1}', inputs.request_digest, inputs.claim_nonce) }}
+name: '[ci][core-request][gh-linux] Build & Test'
+run-name: ${{ format('bridge:{0}:{1}', inputs.request_digest, inputs.dispatch_nonce) }}
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
       request_digest:
         required: true
         type: string
-      claim_nonce:
+      dispatch_nonce:
         required: true
         type: string
 
@@ -48,7 +48,7 @@ jobs:
           source-run-id: ${{ inputs.source_run_id }}
           source-attempt: ${{ inputs.source_attempt }}
           request-digest: ${{ inputs.request_digest }}
-          claim-nonce: ${{ inputs.claim_nonce }}
+          dispatch-nonce: ${{ inputs.dispatch_nonce }}
 
   rust:
     name: Rust
@@ -74,7 +74,7 @@ jobs:
           source-run-id: ${{ inputs.source_run_id }}
           source-attempt: ${{ inputs.source_attempt }}
           request-digest: ${{ inputs.request_digest }}
-          claim-nonce: ${{ inputs.claim_nonce }}
+          dispatch-nonce: ${{ inputs.dispatch_nonce }}
 
       - name: Mint private source token
         id: source-token
