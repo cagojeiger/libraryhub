@@ -1,4 +1,4 @@
-name: Validate workflows
+name: '[ci][push·pr][gh-linux] Validate workflows'
 
 on:
   push:

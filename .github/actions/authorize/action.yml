@@ -22,7 +22,7 @@ inputs:
   request-digest:
     description: Digest of the validated source-free CI request
     required: true
-  claim-nonce:
+  dispatch-nonce:
     description: Immutable dispatch reservation nonce
     required: true
 outputs:
@@ -73,7 +73,7 @@ runs:
         CORE_RUN_ID: ${{ inputs.source-run-id }}
         CORE_ATTEMPT: ${{ inputs.source-attempt }}
         REQUEST_DIGEST: ${{ inputs.request-digest }}
-        CLAIM_NONCE: ${{ inputs.claim-nonce }}
+        DISPATCH_NONCE: ${{ inputs.dispatch-nonce }}
       run: python3 .control/.github/ci/bridge.py gate
 
     - name: Revoke the private metadata token
