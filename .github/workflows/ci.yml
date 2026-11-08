@@ -1,0 +1,106 @@
+name: CI
+run-name: ${{ format('bridge:{0}:{1}', inputs.request_digest, inputs.claim_nonce) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        required: true
+        type: string
+      source_attempt:
+        required: true
+        type: string
+      request_digest:
+        required: true
+        type: string
+      claim_nonce:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gate:
+    name: Gate
+    if: github.repository_id == '1449858609' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tested-sha: ${{ steps.authorize.outputs.tested-sha }}
+    steps:
+      - name: Checkout trusted public workflow support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github
+
+      - name: Authorize this public run
+        id: authorize
+        uses: ./.github/actions/authorize
+        with:
+          client-id: ${{ vars.CORE_READ_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CORE_READ_APP_PRIVATE_KEY }}
+          core-control-revision: ${{ vars.CORE_CONTROL_REVISION }}
+          dispatch-actor-id: ${{ vars.DISPATCH_ACTOR_ID }}
+          source-run-id: ${{ inputs.source_run_id }}
+          source-attempt: ${{ inputs.source_attempt }}
+          request-digest: ${{ inputs.request_digest }}
+          claim-nonce: ${{ inputs.claim_nonce }}
+
+  rust:
+    name: Rust
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout trusted public workflow support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github
+
+      - name: Authorize this worker before fetching private source
+        id: authorize
+        uses: ./.github/actions/authorize
+        with:
+          client-id: ${{ vars.CORE_READ_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CORE_READ_APP_PRIVATE_KEY }}
+          core-control-revision: ${{ vars.CORE_CONTROL_REVISION }}
+          dispatch-actor-id: ${{ vars.DISPATCH_ACTOR_ID }}
+          source-run-id: ${{ inputs.source_run_id }}
+          source-attempt: ${{ inputs.source_attempt }}
+          request-digest: ${{ inputs.request_digest }}
+          claim-nonce: ${{ inputs.claim_nonce }}
+
+      - name: Mint private source token
+        id: source-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.CORE_READ_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CORE_READ_APP_PRIVATE_KEY }}
+          owner: cagojeiger
+          repositories: libraryhub-core
+          permission-contents: read
+          skip-token-revoke: true
+
+      - name: Fetch the exact source and revoke its token
+        env:
+          CORE_READ_TOKEN: ${{ steps.source-token.outputs.token }}
+          GATED_SHA: ${{ needs.gate.outputs.tested-sha }}
+          TESTED_SHA: ${{ steps.authorize.outputs.tested-sha }}
+        run: |
+          [[ "$TESTED_SHA" == "$GATED_SHA" ]]
+          bash .github/scripts/private_run.sh bash .github/scripts/checkout_core.sh
+
+      - name: Check Rust and container
+        run: bash .github/scripts/private_run.sh make -C source release-check
+
+      - name: Ensure the source token is revoked
+        if: ${{ always() && steps.source-token.outputs.token != '' }}
+        env:
+          CORE_READ_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: bash .github/scripts/private_run.sh bash .github/scripts/revoke_core_token.sh
