@@ -1,19 +1,11 @@
 name: '[ci][core-request][gh-linux] Build & Test'
-run-name: ${{ format('bridge:{0}:{1}', inputs.request_digest, inputs.dispatch_nonce) }}
+run-name: Core ci ${{ fromJSON(inputs.request).request.run_id }}.${{ fromJSON(inputs.request).request.attempt }} ${{ fromJSON(inputs.request).request.tested_sha }}
 
 on:
   workflow_dispatch:
     inputs:
-      source_run_id:
-        required: true
-        type: string
-      source_attempt:
-        required: true
-        type: string
-      request_digest:
-        required: true
-        type: string
-      dispatch_nonce:
+      request:
+        description: Immutable Core CI request
         required: true
         type: string
 
@@ -22,62 +14,19 @@ permissions:
   actions: read
 
 jobs:
-  gate:
-    name: Gate
-    if: github.repository_id == '1449858609' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      tested-sha: ${{ steps.authorize.outputs.tested-sha }}
-    steps:
-      - name: Checkout trusted public workflow support
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-          sparse-checkout: .github
-
-      - name: Authorize this public run
-        id: authorize
-        uses: ./.github/actions/authorize
-        with:
-          client-id: ${{ vars.CORE_READ_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CORE_READ_APP_PRIVATE_KEY }}
-          core-control-revision: ${{ vars.CORE_CONTROL_REVISION }}
-          dispatch-actor-id: ${{ vars.DISPATCH_ACTOR_ID }}
-          source-run-id: ${{ inputs.source_run_id }}
-          source-attempt: ${{ inputs.source_attempt }}
-          request-digest: ${{ inputs.request_digest }}
-          dispatch-nonce: ${{ inputs.dispatch_nonce }}
-
   rust:
     name: Rust
-    needs: gate
-    runs-on: ubuntu-latest
+    if: >-
+      github.repository_id == '1449858609' && github.ref == 'refs/heads/main' &&
+      github.actor_id == '353919166' && github.run_attempt == 1
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: .control
     steps:
-      - name: Checkout trusted public workflow support
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-          sparse-checkout: .github
-
-      - name: Authorize this worker before fetching private source
-        id: authorize
-        uses: ./.github/actions/authorize
-        with:
-          client-id: ${{ vars.CORE_READ_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CORE_READ_APP_PRIVATE_KEY }}
-          core-control-revision: ${{ vars.CORE_CONTROL_REVISION }}
-          dispatch-actor-id: ${{ vars.DISPATCH_ACTOR_ID }}
-          source-run-id: ${{ inputs.source_run_id }}
-          source-attempt: ${{ inputs.source_attempt }}
-          request-digest: ${{ inputs.request_digest }}
-          dispatch-nonce: ${{ inputs.dispatch_nonce }}
-
-      - name: Mint private source token
-        id: source-token
+      - name: Mint scoped Core read token
+        id: reader
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         with:
           client-id: ${{ vars.CORE_READ_APP_CLIENT_ID }}
@@ -85,22 +34,39 @@ jobs:
           owner: cagojeiger
           repositories: libraryhub-core
           permission-contents: read
+          permission-actions: read
           skip-token-revoke: true
-
-      - name: Fetch the exact source and revoke its token
+      - name: Checkout trusted private CI control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: cagojeiger/libraryhub-core
+          ref: main
+          token: ${{ steps.reader.outputs.token }}
+          path: .control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Validate immutable Core request
+        id: gate
         env:
-          CORE_READ_TOKEN: ${{ steps.source-token.outputs.token }}
-          GATED_SHA: ${{ needs.gate.outputs.tested-sha }}
-          TESTED_SHA: ${{ steps.authorize.outputs.tested-sha }}
-        run: |
-          [[ "$TESTED_SHA" == "$GATED_SHA" ]]
-          bash .github/scripts/private_run.sh bash .github/scripts/checkout_core.sh
-
+          CORE_TOKEN: ${{ steps.reader.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_JSON: ${{ inputs.request }}
+        run: python3 .github/scripts/ci_bridge.py gate >> "$GITHUB_OUTPUT"
+      - name: Fetch exact private source and revoke read token
+        id: source
+        env:
+          CORE_READ_TOKEN: ${{ steps.reader.outputs.token }}
+          TESTED_SHA: ${{ steps.gate.outputs.tested_sha }}
+        run: bash .github/scripts/private_run.sh bash .github/scripts/checkout_core.sh
       - name: Check Rust and container
         run: bash .github/scripts/private_run.sh make -C source release-check
-
-      - name: Ensure the source token is revoked
-        if: ${{ always() && steps.source-token.outputs.token != '' }}
+      - name: Ensure Core read token is revoked after setup failure
+        if: always() && steps.reader.outputs.token != '' && steps.source.outcome != 'success'
+        working-directory: ${{ github.workspace }}
         env:
-          CORE_READ_TOKEN: ${{ steps.source-token.outputs.token }}
-        run: bash .github/scripts/private_run.sh bash .github/scripts/revoke_core_token.sh
+          CORE_READ_TOKEN: ${{ steps.reader.outputs.token }}
+        run: |
+          status=$(printf 'header = "Authorization: Bearer %s"\n' "$CORE_READ_TOKEN" |
+            curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' \
+              --request DELETE --config - https://api.github.com/installation/token)
+          test "$status" = 204 || test "$status" = 401
